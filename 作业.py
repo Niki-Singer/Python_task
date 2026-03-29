@@ -1,5 +1,6 @@
 import os
 import random
+import time
 
 
 class Student:
@@ -14,6 +15,8 @@ class Student:
         self.class_name = class_name
         self.student_id = student_id
         self.college = college
+        # 新增属性：座位号，默认为None，由系统逻辑分配
+        self.seat_number = None
 
     def __str__(self):
         return (f"--- 学生详细信息 ---\n"
@@ -33,10 +36,13 @@ class ExamSystem:
     def __init__(self, file_path):
         self.students_map = {}
 
-        # 在初始化阶段直接读取文件
+        if not os.path.exists(file_path):
+            print(f"警告：找不到文件 {file_path}，请确保路径正确。")
+            return
+
+        # 初始化数据加载
         with open(file_path, 'r', encoding='utf-8') as file:
             lines = file.readlines()
-            # 解析跳过首行后的每一行数据
             for line in lines[1:]:
                 data = line.strip().split()
                 if len(data) >= 6:
@@ -49,89 +55,129 @@ class ExamSystem:
     @staticmethod
     def validate_input_digit(input_str):
         """
-        静态方法：校验输入是否为纯数字且非空。
+        静态方法：校验输入是否为纯数字。
         """
         return input_str.isdigit() and len(input_str) > 0
 
+    @staticmethod
+    def format_current_time():
+        """
+        静态方法：使用time库获取当前格式化时间。
+        """
+        time_struct = time.localtime(time.time())
+        return time.strftime("%Y-%m-%d %H:%M:%S", time_struct)
+
     def find_student_by_id(self):
         """
-        交互式按学号查询功能。
+        按学号查询学生详细信息。
         """
         while True:
             search_id = input("\n请输入要查询的学号 (输入 'q' 退出查询): ").strip()
-
             if search_id.lower() == 'q':
                 break
 
-            # 校验学号输入格式
             if not self.validate_input_digit(search_id):
-                print("您的输入不符合要求，学号必须为纯数字，请重新输入。")
+                print("学号格式不正确，请输入纯数字。")
                 continue
 
             student = self.students_map.get(search_id)
-
-            if student:
-                print(student)
-            else:
-                print(f"您的输入不符合要求，未找到学号为 '{search_id}' 的学生，请重新输入。")
+            print(student if student else f"未找到学号为 '{search_id}' 的学生。")
 
     def perform_random_roll_call(self):
         """
-        随机点名功能：包含输入异常处理及数量上限限制。
+        随机点名功能。
         """
         total_count = len(self.students_map)
-
         while True:
-            print(f"\n当前系统总人数：{total_count}")
-            count_input = input("请输入需要随机点名的学生数量 (输入 'q' 退出点名): ").strip()
-
+            count_input = input(f"\n当前总人数 {total_count}，请输入点名人数 (输入 'q' 退出): ").strip()
             if count_input.lower() == 'q':
                 break
 
-            # 校验数量输入格式
             if not self.validate_input_digit(count_input):
-                print("您的输入不符合要求，输入数量必须为纯数字，请重新输入。")
+                print("请输入有效的数字数量。")
                 continue
 
             num_to_pick = int(count_input)
-
-            # 校验数量范围
-            if num_to_pick <= 0 or num_to_pick > total_count:
-                print(f"您的输入不符合要求，数量必须在 1 到 {total_count} 之间，请重新输入。")
-            else:
-                # 转换为列表进行不重复随机采样
+            if 0 < num_to_pick <= total_count:
                 all_students = list(self.students_map.values())
-                selected_students = random.sample(all_students, num_to_pick)
-
-                print(f"\n--- 随机点名结果 ({num_to_pick}人) ---")
-                for i, student in enumerate(selected_students, 1):
-                    print(f"[{i}] {student.name} | 学号: {student.student_id} | 班级: {student.class_name}")
-                print("---------------------------------")
+                selected = random.sample(all_students, num_to_pick)
+                print(f"\n--- 随机点名结果 ---")
+                for i, s in enumerate(selected, 1):
+                    print(f"[{i}] {s.name} ({s.student_id})")
                 break
+            else:
+                print(f"输入范围错误，应在 1-{total_count} 之间。")
+
+    def generate_exam_arrangement(self):
+        """
+        生成考场安排表：
+        1. 随机分配座位号。
+        2. 按座位号从小到大排序。
+        3. 输出文件，包含生成时间。
+        """
+        if not self.students_map:
+            print("数据为空，无法生成安排表。")
+            return
+
+        # 1. 获取所有学生对象列表
+        student_list = list(self.students_map.values())
+        num_students = len(student_list)
+
+        # 2. 生成 1 到 N 的随机座位号序列
+        seat_indices = list(range(1, num_students + 1))
+        random.shuffle(seat_indices)
+
+        # 3. 将座位号赋予学生对象
+        for i in range(num_students):
+            student_list[i].seat_number = seat_indices[i]
+
+        # 4. 关键：按照座位号 (seat_number) 从小到大排序
+        # 使用 lambda 表达式指定排序关键字
+        student_list.sort(key=lambda x: x.seat_number)
+
+        # 5. 写入文件
+        file_path = "考场安排表.txt"
+        current_time_str = self.format_current_time()
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                # 写入第一行时间
+                f.write(f"生成时间：{current_time_str}\n")
+
+                # 遍历排序后的学生列表，按格式输出
+                for student in student_list:
+                    line = f"{student.seat_number} | {student.name} | {student.student_id}\n"
+                    f.write(line)
+
+            print(f"\n[成功] 考场安排表已生成！")
+            print(f"保存位置：{os.path.abspath(file_path)}")
+        except Exception as e:
+            print(f"文件写入失败，错误信息：{e}")
 
 
 # --- 程序主入口 ---
 if __name__ == "__main__":
     target_file = "人工智能编程语言学生名单.txt"
-
-    # 实例化即完成数据加载
     system = ExamSystem(target_file)
 
     while True:
         print("\n===== 学生信息与考场管理系统 =====")
         print("1. 按学号查询学生信息")
         print("2. 随机点名抽取")
-        print("3. 退出系统")
+        print("3. 生成考场安排表")
+        print("4. 退出系统")
         print("==================================")
 
-        user_choice = input("请选择操作序号 (1-3): ").strip()
+        user_choice = input("请选择操作序号 (1-4): ").strip()
 
         if user_choice == '1':
             system.find_student_by_id()
         elif user_choice == '2':
             system.perform_random_roll_call()
         elif user_choice == '3':
-            print("程序已安全退出。")
+            system.generate_exam_arrangement()
+        elif user_choice == '4':
+            print("系统已退出。")
             break
         else:
-            print("您的输入不符合要求，序号必须为 1, 2 或 3，请重新输入。")
+            print("输入无效，请输入 1-4 之间的数字。")
