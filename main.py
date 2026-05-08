@@ -1,121 +1,255 @@
 import pandas as pd
 import numpy as np
 import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 class DataProcessor:
     """
     M1: 数据处理模块
-    负责数据加载、质量检测、清洗以及特征衍生。
+    功能：加载、质量分析、分步清洗、特征衍生。
     """
 
     def __init__(self, file_path):
         self.file_path = file_path
         self.df = None
-        self.quality_report = {}
+        self.total_initial_rows = 0
 
-    def load_data(self):
-        """加载Parquet数据"""
+    def load_and_report(self):
+        """
+        加载数据并输出初始数据质量报告
+        """
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"未找到文件: {self.file_path}")
-        print(f"正在加载数据: {self.file_path}...")
+
         self.df = pd.read_parquet(self.file_path)
-        print(f"数据加载完成，共 {len(self.df)} 条记录。")
+        self.total_initial_rows = len(self.df)
 
-    def generate_quality_report(self):
-        """生成数据质量报告（缺失率、异常值统计）"""
-        report = {}
-        # 1. 缺失率
-        missing_rates = self.df.isnull().mean() * 100
-        report['missing_rates'] = missing_rates[missing_rates > 0].to_dict()
+        print("=" * 50)
+        print(f"项目启动：2023年1月黄色出租车数据处理")
+        print(f"原始总数据量: {self.total_initial_rows} 条")
 
-        # 2. 异常值统计 (针对关键数值字段)
-        numerical_cols = ['passenger_count', 'trip_distance', 'fare_amount', 'total_amount']
-        stats = self.df[numerical_cols].describe(percentiles=[0.01, 0.99]).T
-        report['outlier_stats'] = stats.to_dict('index')
+        # 1. 缺失值统计
+        missing_counts = self.df.isnull().sum()
+        total_missing = missing_counts.sum()
+        print(f"\n[缺失值报告]")
+        for col, count in missing_counts[missing_counts > 0].items():
+            percentage = (count / self.total_initial_rows) * 100
+            print(f"- 字段 {col}: 缺失 {count} 条, 占比 {percentage:.4f}%")
 
-        self.quality_report = report
-        print("数据质量报告已生成。")
-        return report
+        # 2. 异常值初步统计 (基于业务常识的极值定义)
+        # 定义：行程距离<=0 或 >100; 费用<=0 或 >1000; 乘客数<=0 或 >6
+        outliers_mask = (
+                (self.df['trip_distance'] <= 0) | (self.df['trip_distance'] > 100) |
+                (self.df['fare_amount'] <= 0) | (self.df['fare_amount'] > 1000) |
+                (self.df['passenger_count'] <= 0) | (self.df['passenger_count'] > 6)
+        )
+        outlier_count = outliers_mask.sum()
+        print(f"\n[异常值报告]")
+        print(f"- 业务逻辑异常数据 (距离/金额/人数): {outlier_count} 条")
+        print(f"- 异常数据占比: {(outlier_count / self.total_initial_rows) * 100:.4f}%")
+        print("=" * 50)
 
-    def clean_data(self):
+    def clean_data_stepwise(self):
         """
-        清洗数据逻辑及理由：
-        1. 去除坐标/区域ID缺失值：确保地理分析准确性。
-        2. 过滤费用异常：fare_amount 应 > 0，total_amount 应 > 0（排除撤销单或测试单）。
-        3. 过滤距离异常：trip_distance 应 > 0 且在合理范围内（如 < 100英里）。
-        4. 乘客人数过滤：passenger_count 应 > 0 且 <= 6（法定最大人数）。
-        5. 时间过滤：仅保留 2023-01 内的数据，排除系统误差导致的跨年数据。
+        分步清洗数据：每步操作均遵循“策略说明 -> 编程实现 -> 注释解释”
         """
-        initial_count = len(self.df)
+        print("\n开始分步清洗数据...")
 
-        # 策略 1: 时间清洗 (确保在2023年1月内)
+        # --- 第一步策略：时间范围清洗 ---
+        # 理由：Parquet文件中常含有记录设备故障产生的非2023-01月份的脏数据，需剔除。
         self.df = self.df[
             (self.df['tpep_pickup_datetime'] >= '2023-01-01') &
             (self.df['tpep_pickup_datetime'] < '2023-02-01')
             ]
+        # 注释：以上代码过滤掉不属于2023年1月的订单，确保分析对象的时效准确。
 
-        # 策略 2: 过滤金额和距离 (排除负数或极端的异常值)
-        self.df = self.df[(self.df['fare_amount'] > 0) & (self.df['fare_amount'] < 500)]
-        self.df = self.df[(self.df['trip_distance'] > 0) & (self.df['trip_distance'] < 100)]
+        # --- 第二步策略：核心业务字段异常值清洗 ---
+        # 理由：行程距离为0、费用为负或乘客数为0的数据在统计学上属于无效行程。
+        self.df = self.df[
+            (self.df['trip_distance'] > 0) &
+            (self.df['fare_amount'] > 0) &
+            (self.df['passenger_count'] > 0)
+            ]
+        # 注释：过滤掉无效的零/负值数据，防止均值分析被极端值拉低。
 
-        # 策略 3: 过滤乘客数 (排除0人或超载情况)
-        self.df = self.df[(self.df['passenger_count'] > 0) & (self.df['passenger_count'] <= 6)]
+        # --- 第三步策略：地理位置ID清洗 ---
+        # 理由：PULocationID和DOLocationID是后续空间分析的核心，若为Unknown(264/265)则无法分析。
+        self.df = self.df[
+            (~self.df['PULocationID'].isin([264, 265])) &
+            (~self.df['DOLocationID'].isin([264, 265]))
+            ]
+        # 注释：剔除起始点未知的记录，为后续的M2/M3地理维度建模打下基础。
 
-        # 策略 4: 处理缺失值 (对关键字段进行dropna)
-        self.df.dropna(subset=['PULocationID', 'DOLocationID', 'payment_type'], inplace=True)
+        # --- 第四步策略：处理缺失值 ---
+        # 理由：对于乘客数或付款方式极少量的缺失，采用直接剔除法以维持数据纯净度。
+        self.df.dropna(subset=['passenger_count', 'payment_type'], inplace=True)
+        # 注释：移除包含空值的行，保证后续矩阵运算不产生空值报错。
 
-        final_count = len(self.df)
+        final_rows = len(self.df)
         print(
-            f"清洗完成。过滤掉 {initial_count - final_count} 条记录 ({((initial_count - final_count) / initial_count) * 100:.2f}%)。")
+            f"清洗完成！保留有效数据: {final_rows} 条，总过滤占比: {((self.total_initial_rows - final_rows) / self.total_initial_rows) * 100:.2f}%")
 
     def engineer_features(self):
         """
-        提取时间特征与设计衍生特征
+        特征提取：基础特征 + 2个衍生特征
         """
-        # --- 基础时间特征提取 ---
+        print("\n开始特征提取与衍生...")
+
+        # 1. 基础特征
         self.df['pickup_hour'] = self.df['tpep_pickup_datetime'].dt.hour
-        self.df['day_of_week'] = self.df['tpep_pickup_datetime'].dt.dayofweek  # 0=Monday
-        self.df['is_weekend'] = self.df['day_of_week'].isin([5, 6]).astype(int)
+        self.df['day_of_week'] = self.df['tpep_pickup_datetime'].dt.dayofweek  # 0=周一
 
-        # 高峰时段定义 (工作日 08:00-10:00, 17:00-20:00)
-        self.df['is_peak_hour'] = ((self.df['day_of_week'] < 5) &
-                                   ((self.df['pickup_hour'].between(8, 10)) |
-                                    (self.df['pickup_hour'].between(17, 20)))).astype(int)
+        # 是否高峰 (工作日 8-10点, 17-20点)
+        self.df['is_peak'] = ((self.df['day_of_week'] < 5) &
+                              (self.df['pickup_hour'].isin([8, 9, 10, 17, 18, 19, 20]))).astype(int)
 
-        # --- 衍生特征 1: 平均车速 (miles per hour) ---
-        # 理由：反映交通拥堵状况。
-        duration_hours = (self.df['tpep_dropoff_datetime'] - self.df['tpep_pickup_datetime']).dt.total_seconds() / 3600
-        # 避免除以0或极短时间导致的速度异常
-        self.df['avg_speed'] = self.df['trip_distance'] / duration_hours.replace(0, np.nan)
-        self.df.loc[(self.df['avg_speed'] > 80) | (self.df['avg_speed'] < 1), 'avg_speed'] = np.nan  # 过滤非人类车速
+        # 2. 衍生特征提取输出说明：
+        # 特征一：avg_speed (平均行驶速度，单位：英里/小时)
+        # 判断指标：trip_distance / 行程时长(小时)。用于衡量路网拥堵程度。
+        duration_h = (self.df['tpep_dropoff_datetime'] - self.df['tpep_pickup_datetime']).dt.total_seconds() / 3600
+        self.df['avg_speed'] = self.df['trip_distance'] / duration_h
+        # 限制合理车速 (1-80 mph)
+        self.df = self.df[(self.df['avg_speed'] > 0) & (self.df['avg_speed'] < 80)]
 
-        # --- 衍生特征 2: 小费比例 (tip_fraction) ---
-        # 理由：反映乘客满意度或该区域乘客的支付习惯。
-        self.df['tip_fraction'] = self.df['tip_amount'] / self.df['fare_amount']
+        # 特征二：efficiency_score (订单创收效率)
+        # 判断指标：fare_amount / (行程时长+1s)。用于衡量每单位时间产生的经济效益。
+        self.df['efficiency_score'] = self.df['fare_amount'] / (duration_h * 60 + 0.01)  # 分钟收益
 
-        print("特征工程完成。新增特征：pickup_hour, is_peak_hour, avg_speed, tip_fraction 等。")
+        print("-" * 30)
+        print("【衍生特征提取报告】")
+        print("1. 特征名: avg_speed | 指标: 距离/时间 | 意义: 识别交通拥堵与路况")
+        print("2. 特征名: efficiency_score | 指标: 车费/时长 | 意义: 评估不同时段/地段的运营价值")
+        print("-" * 30)
 
-    def get_processed_data(self):
-        """返回处理后的DataFrame"""
+    def get_data(self):
         return self.df
 
 
-# --- 模块运行示例 (仅用于演示，后续会被集成) ---
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import matplotlib.font_manager as fm
+
+
+class DataAnalyzer:
+    """
+    M2: 分析可视化模块
+    功能：实现出行规律、区域热度、影响因素及行程经济效益洞察。
+    """
+
+    def __init__(self, df):
+        self.df = df.copy()
+        self.output_dir = 'outputs'
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+        self._setup_chinese_font()
+
+    def _setup_chinese_font(self):
+        """配置中文字体以支持中文显示"""
+        fonts = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Heiti SC', 'STHeiti', 'Arial Unicode MS']
+        for f in fonts:
+            if any(f in font.name for font in fm.fontManager.ttflist):
+                plt.rcParams['font.sans-serif'] = [f]
+                break
+        plt.rcParams['axes.unicode_minus'] = False
+        sns.set_theme(style="whitegrid", font=plt.rcParams['font.sans-serif'][0])
+
+    def _ensure_dimensions(self):
+        """内部特征补全：确保绘图所需的衍生维度存在"""
+        if 'day_of_week' not in self.df.columns:
+            self.df['day_of_week'] = self.df['tpep_pickup_datetime'].dt.dayofweek
+        if 'is_weekend' not in self.df.columns:
+            self.df['is_weekend'] = self.df['day_of_week'].isin([5, 6]).astype(int)
+
+    def analyze_time_patterns(self):
+        """1. 出行需求时间规律"""
+        print("执行分析 1: 出行需求时间规律...")
+        self._ensure_dimensions()
+        time_stats = self.df.groupby(['pickup_hour', 'is_weekend']).size().reset_index(name='count')
+        time_stats['日期类型'] = time_stats['is_weekend'].map({0: '工作日', 1: '周末'})
+
+        plt.figure(figsize=(12, 6))
+        sns.lineplot(data=time_stats, x='pickup_hour', y='count', hue='日期类型', marker='o')
+        plt.title('2023年1月纽约出租车：分时段订单趋势', fontsize=14)
+        plt.xlabel('小时 (0-23)')
+        plt.ylabel('订单总量')
+        plt.savefig(f'{self.output_dir}/m2_1_time_patterns.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def analyze_location_hotspots(self):
+        """2. 区域热度分析"""
+        print("执行分析 2: 区域热度分析...")
+        top_10_zones = self.df['PULocationID'].value_counts().head(10).index
+        hot_df = self.df[self.df['PULocationID'].isin(top_10_zones)]
+        pivot_table = hot_df.pivot_table(index='PULocationID', columns='pickup_hour', values='VendorID',
+                                         aggfunc='count', fill_value=0)
+
+        plt.figure(figsize=(14, 7))
+        sns.heatmap(pivot_table, cmap='YlGnBu', cbar_kws={'label': '订单热度'})
+        plt.title('Top 10 上客核心区域的小时流量分布', fontsize=14)
+        plt.xlabel('时段')
+        plt.ylabel('区域代码 (PULocationID)')
+        plt.savefig(f'{self.output_dir}/m2_2_location_hotspots.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def analyze_fare_factors(self):
+        """3. 车费影响因素分析"""
+        print("执行分析 3: 车费影响因素分析...")
+        sample_df = self.df.sample(n=min(20000, len(self.df)), random_state=42)
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(data=sample_df, x='trip_distance', y='fare_amount', alpha=0.2, color='teal')
+        plt.title('行程距离与车费金额关联性分析', fontsize=14)
+        plt.xlabel('行程距离 (英里)')
+        plt.ylabel('基础车费 (美元)')
+        plt.xlim(0, self.df['trip_distance'].quantile(0.99))
+        plt.ylim(0, self.df['fare_amount'].quantile(0.99))
+        plt.savefig(f'{self.output_dir}/m2_3_fare_factors.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def analyze_insight_value(self):
+        """
+        4. 自选价值分析（新）：不同距离区间的订单效率分析
+        分析目的：识别哪些长度的订单能产生最高的“每分钟收益”，为司机接单策略提供参考。
+        """
+        print("执行分析 4: 智能化运营 - 行程距离对每分钟收益效率的影响...")
+
+        # 将距离划分为不同区间 (Binning)
+        bins = [0, 2, 5, 10, 20, 100]
+        labels = ['超短途(0-2)', '短途(2-5)', '中途(5-10)', '远途(10-20)', '超远途(20+)']
+        temp_df = self.df.copy()
+        temp_df['距离区间'] = pd.cut(temp_df['trip_distance'], bins=bins, labels=labels)
+
+        plt.figure(figsize=(10, 6))
+        # 绘制不同距离区间的平均效率得分 (efficiency_score 由 M1 定义)
+        sns.barplot(data=temp_df, x='距离区间', y='efficiency_score', palette='viridis', hue='距离区间', legend=False)
+
+        plt.title('订单运营效率随行程距离的变化趋势', fontsize=14)
+        plt.ylabel('每分钟收益 (美元/分钟)')
+        plt.xlabel('行程距离区间 (英里)')
+
+        # 排除效率得分的极端异常值对均值显示的影响
+        plt.ylim(0, temp_df['efficiency_score'].quantile(0.95))
+
+        plt.savefig(f'{self.output_dir}/m2_4_efficiency_insight.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+
 if __name__ == "__main__":
-    # 假设文件在当前目录下
-    FILE_NAME = 'yellow_tripdata_2023-01.parquet'
+    # 步骤1: 运行 M1 模块
+    processor = DataProcessor('yellow_tripdata_2023-01.parquet')
+    processor.load_and_report()
+    processor.clean_data_stepwise()
+    processor.engineer_features()
+    clean_df = processor.get_data()
 
-    processor = DataProcessor(FILE_NAME)
-    try:
-        processor.load_data()
-        report = processor.generate_quality_report()
-        # print("质量报告片段:", list(report['outlier_stats'].items())[:2])
-
-        processor.clean_data()
-        processor.engineer_features()
-
-        final_df = processor.get_processed_data()
-        print(f"处理后数据列名: {final_df.columns.tolist()}")
-    except Exception as e:
-        print(f"运行出错: {e}")
+    # 步骤2: 运行 M2 模块
+    if clean_df is not None:
+        analyzer = DataAnalyzer(clean_df)
+        analyzer.analyze_time_patterns()
+        analyzer.analyze_location_hotspots()
+        analyzer.analyze_fare_factors()
+        analyzer.analyze_insight_value()  # 执行更新后的分析
+        print("\n所有中文图表已更新并生成至 'outputs' 文件夹。")
