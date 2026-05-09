@@ -79,6 +79,7 @@ step3：从行程时间中提取小时、星期、是否高峰等特征，并设
 M2 分析可视化
 
 总：在这个功能部分中，你要实现四个小任务，完成 4 项分析，每项对应至少 1 张图表，所有图表自动保存至 outputs/ 目录
+
 step1：根据M1获得的数据，分小时、分工作日/周末来绘制分小时平均订单量折线图，用于分析出行需求时间规律
 （debug：生成的图片存在中文字段显示异常的问题，请你帮我考虑字段兼容的问题并帮我完善代码）
 
@@ -91,6 +92,7 @@ debug2：AI生成的乘客人数-车费散点图形成了几条大柱子，每�
 debug3：AI生成的时段-车费散点图叶形成了几条大柱子，每列数据之间几乎没有区别，
 我想到可以把车费按阶梯计算，每10美元为一个阶梯，于是我给出prompt：
 时段-车费散点图的可视化展现不理想，请你把车费按阶梯计算，每10美元为一个阶梯进行分类，并且仿照乘客人数-车费散点图的生成模式生成散点图）
+
 step4：根据M1获得的数据，分析不同供应商的行程距离与车费差异，并生成不同供应商的行程距离-车费折线图。
 
 
@@ -157,13 +159,153 @@ System Prompt 的设计与迭代过程
 
 --------------------------------------------------------------------------------------------------------------------
 native
-存在一定的逻辑混乱问题，可读性不强，并且有许多细节没有考虑到
+命名不够规范清晰易懂，不如AI生成的变量名，让人一下知道是什么含义，代码一块块的不好阅读，可读性差，编写时间久，考虑到的问题也不全面
+class M2:
+    def __init__(self, df):
+        self.df = df
+        if not os.path.exists('outputs'):   #创建输出目录
+            os.makedirs('outputs')
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+        plt.rcParams['axes.unicode_minus'] = False
+        sns.set_theme(style="whitegrid", font='SimHei')  #防止图表显示异常
+
+    def analyze(self):
+        self.df['day_type'] = self.df['day_of_week'].apply(lambda x: '周末' if x >= 5 else '工作日')
+
+        hour = self.df.groupby(
+            [self.df['tpep_pickup_datetime'].dt.date, 'day_type', 'pickup_hour']).size().reset_index(name='order_count')
+        avg = hour.groupby(['day_type', 'pickup_hour'])['order_count'].mean().reset_index()
+
+        #绘制分小时、分工作日/周末平均订单量折线图
+        plt.figure(figsize=(10, 6))
+        #工作日
+        workday = avg[avg['day_type'] == '工作日']
+        plt.plot(workday['pickup_hour'], workday['order_count'],
+                 marker='o', label='工作日', color='blue', linewidth=2)
+        #周末
+        weekend = avg[avg['day_type'] == '周末']
+        plt.plot(weekend['pickup_hour'], weekend['order_count'],
+                 marker='s', label='周末', color='red', linestyle='--', linewidth=2)
+
+        plt.title("2023年1月纽约黄色出租车每小时平均订单量")
+        plt.xlabel("出发时间")
+        plt.ylabel("平均订单量")
+        plt.xticks(range(0, 24))
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig('outputs/每小时平均订单量折线图.png')
+        plt.show()
 --------------------------------------------------------------------------------------------------------------------
 prompt
-实现功能清晰，逻辑性强，可读性高，编写效率高
+实现功能清晰，逻辑性强，可读性高（模块化），但是AI对于我给的prompt理解不能够完全准确，导致出现了一些bug需要修改，但在修改后能有效避免不兼容等多种未考虑的情况
+class DataAnalyzer:
+    # 新建output目录
+    def __init__(self, df):
+        self.df = df.copy()
+        self.output_dir = 'outputs'
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+        self._setup_chinese_font()
+
+    def _setup_chinese_font(self):
+        # 配置中文字体以支持中文显示
+        #（注：此段是在中文无法正常显示情况下，寻求AI帮助，AI提供的解决方案，能够兼容更多种图标中文显示异常的问题）
+        fonts = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Heiti SC', 'STHeiti', 'Arial Unicode MS']
+        for f in fonts:
+            if any(f in font.name for font in fm.fontManager.ttflist):
+                plt.rcParams['font.sans-serif'] = [f]
+                break
+        plt.rcParams['axes.unicode_minus'] = False
+        sns.set_theme(style="whitegrid", font=plt.rcParams['font.sans-serif'][0])
+
+    #进行内部特征的补全，以确保绘图所需的横纵坐标内容存在
+    def _ensure_dimensions(self):
+        if 'day_of_week' not in self.df.columns:
+            self.df['day_of_week'] = self.df['tpep_pickup_datetime'].dt.dayofweek
+        if 'is_weekend' not in self.df.columns:
+            self.df['is_weekend'] = self.df['day_of_week'].isin([5, 6]).astype(int)
+
+    # 1.出行需求时间规律
+    def analyze_time_patterns(self):
+        self._ensure_dimensions()
+        time_stats = self.df.groupby(['pickup_hour', 'is_weekend']).size().reset_index(name='count')
+        time_stats['日期类型'] = time_stats['is_weekend'].map({0: '工作日', 1: '周末'})
+        plt.figure(figsize=(12, 6))
+        sns.lineplot(data=time_stats, x='pickup_hour', y='count', hue='日期类型', marker='o')
+        plt.title('2023年1月纽约黄色出租车：分时段订单量趋势', fontsize=14)
+        plt.xlabel('小时 (0-23)')
+        plt.ylabel('订单总量')
+        plt.savefig(f'{self.output_dir}/分小时平均订单量折线图.png', dpi=300, bbox_inches='tight')
+        plt.close()
 --------------------------------------------------------------------------------------------------------------------
 vibe
-一开始生成的代码并不能直接符合要求，反复调试之后才勉强符合要求，编写代码指令不清晰导致编写效率低下
+一开始生成的代码并不能直接符合要求（我要求可视化，只是输出了数据量，没有具体的内容，功能也不能直接和我原来的模块做有效衔接，反而是自己随机生成了数据），但是调试之后也能实现分析功能，并且给了多种分析选择，会比我直接编写or给具体prompt多了更多样化的分析（但是分析结果不一定有效，有一些没有意义的分析图表）
+class DemandTimeAnalyzer:
+    """分析出行需求时间规律并可视化并保存结果"""
+
+    def __init__(self, dataframe, output_dir='output'):
+        self.df = dataframe
+        self.output_dir = output_dir
+        # 如果 output 文件夹不存在，则自动创建
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+            print(f"已创建输出目录: {self.output_dir}")
+
+    def plot_hourly_trend(self):
+        """1. 24小时出行趋势图 -> 保存为图片"""
+        hourly_data = self.df.groupby('pickup_hour').size().reset_index(name='order_count')
+
+        plt.figure(figsize=(10, 5))
+        sns.lineplot(data=hourly_data, x='pickup_hour', y='order_count', marker='o', color='royalblue')
+
+        plt.axvspan(8, 10, color='orange', alpha=0.2, label='早高峰')
+        plt.axvspan(17, 20, color='red', alpha=0.1, label='晚高峰')
+
+        plt.title('纽约出租车24小时出行需求分布 (2023-01)', fontsize=14)
+        plt.xlabel('时间 (小时)', fontsize=12)
+        plt.ylabel('订单总量', fontsize=12)
+        plt.xticks(range(24))
+        plt.legend()
+
+        # 保存图片
+        save_path = os.path.join(self.output_dir, 'hourly_trend.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()  # 关闭画布，节省内存
+        print(f"图表已保存至: {save_path}")
+
+    def plot_workday_vs_weekend(self):
+        """2. 工作日 vs 周末 对比图 -> 保存为图片"""
+        self.df['day_type'] = self.df['day_of_week'].apply(lambda x: '周末' if x >= 5 else '工作日')
+
+        daily_hour_count = self.df.groupby(['date', 'pickup_hour', 'day_type']).size().reset_index(name='count')
+        avg_data = daily_hour_count.groupby(['pickup_hour', 'day_type'])['count'].mean().reset_index()
+
+        plt.figure(figsize=(10, 5))
+        sns.lineplot(data=avg_data, x='pickup_hour', y='count', hue='day_type', palette='Set1', style='day_type',
+                     markers=True)
+
+        plt.title('工作日与周末平均出行需求对比', fontsize=14)
+        plt.xlabel('时间 (小时)', fontsize=12)
+        plt.ylabel('平均订单量 (次/小时)', fontsize=12)
+        plt.xticks(range(24))
+
+        # 保存图片
+        save_path = os.path.join(self.output_dir, 'workday_vs_weekend.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"图表已保存至: {save_path}")
+
+    def get_summary_stats(self):
+        """获取统计指标（同前）"""
+        peak_hour = self.df.groupby('pickup_hour').size().idxmax()
+        total = len(self.df)
+        weekend_pct = (self.df['day_of_week'] >= 5).mean() * 100
+
+        return {
+            "总订单量": f"{total:,}",
+            "出行高峰时段": f"{peak_hour}:00 - {peak_hour + 1}:00",
+            "周末出行占比": f"{weekend_pct:.2f}%"
+        }
 ========================================================================
 
 
