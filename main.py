@@ -237,19 +237,169 @@ class DataAnalyzer:
         plt.close()
 
 
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+
+# ==========================================
+# M3: 预测模型模块 (双图独立输出版)
+# ==========================================
+class DemandPredictor:
+    """
+    M3: 预测模型模块
+    功能：构建神经网络预测出行需求，与随机森林对比。
+    变更：将 Loss 曲线与预测对比图拆分为两个独立的图片文件输出。
+    """
+
+    def __init__(self, df):
+        self.df = df.copy()
+        self.output_dir = 'outputs'
+        self.model_nn = None
+        self.history = None
+        self.scaler = StandardScaler()
+
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+
+    def _prepare_demand_data(self):
+        """聚合数据：按区域和小时统计需求"""
+        print("\n[M3] 正在构建区域时段需求量特征...")
+        self.df['pickup_date'] = self.df['tpep_pickup_datetime'].dt.date
+        self.df['pickup_hour'] = self.df['tpep_pickup_datetime'].dt.hour
+
+        agg_data = self.df.groupby(['PULocationID', 'pickup_date', 'pickup_hour']).size().reset_index(name='demand')
+        agg_data['pickup_date'] = pd.to_datetime(agg_data['pickup_date'])
+        agg_data['day_of_week'] = agg_data['pickup_date'].dt.dayofweek
+
+        X = agg_data[['PULocationID', 'pickup_hour', 'day_of_week']]
+        y = agg_data['demand']
+        return train_test_split(X, y, test_size=0.2, random_state=42)
+
+    def run_comparison_experiment(self):
+        """执行对比实验"""
+        X_train, X_test, y_train, y_test = self._prepare_demand_data()
+
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+
+        # 1. 神经网络 (TensorFlow/Keras)
+        import tensorflow as tf
+        from tensorflow.keras import layers, models, Input
+
+        print(f"[M3] 开始训练神经网络模型 (TF {tf.__version__})...")
+        model = models.Sequential([
+            Input(shape=(X_train_scaled.shape[1],)),
+            layers.Dense(128, activation='relu'),
+            layers.Dropout(0.2),
+            layers.Dense(64, activation='relu'),
+            layers.Dense(32, activation='relu'),
+            layers.Dense(1)
+        ])
+
+        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+        self.history = model.fit(
+            X_train_scaled, y_train,
+            epochs=30, batch_size=256, validation_split=0.1, verbose=0
+        )
+        self.model_nn = model
+
+        # 2. 随机森林
+        print("[M3] 开始训练随机森林对比模型...")
+        rf = RandomForestRegressor(n_estimators=100, max_depth=12, random_state=42, n_jobs=-1)
+        rf.fit(X_train, y_train)
+
+        # 3. 评估指标
+        y_pred_nn = self.model_nn.predict(X_test_scaled).flatten()
+        y_pred_rf = rf.predict(X_test)
+
+        results = {
+            '神经网络': {
+                'MAE': mean_absolute_error(y_test, y_pred_nn),
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_nn))
+            },
+            '随机森林': {
+                'MAE': mean_absolute_error(y_test, y_pred_rf),
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_rf))
+            }
+        }
+
+        self._report_and_save_plots(y_test, y_pred_nn, y_pred_rf, results)
+
+    def _report_and_save_plots(self, y_test, y_nn, y_rf, results):
+        """独立保存两张中文图表"""
+        # 打印文字报告
+        print("\n" + "=" * 50)
+        print(f"{'模型':<14} | {'MAE (平均误差)':<12} | {'RMSE (根均误差)':<12}")
+        print("-" * 50)
+        for name, m in results.items():
+            print(f"{name:<12} | {m['MAE']:<14.4f} | {m['RMSE']:<14.4f}")
+        print("=" * 50)
+
+        # 设置中文字体（确保与M2逻辑一致）
+        plt.rcParams['axes.unicode_minus'] = False
+
+        # --- 图表 1: 训练 Loss 曲线 ---
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.history.history['loss'], label='训练集损失', color='blue')
+        plt.plot(self.history.history['val_loss'], label='验证集损失', color='orange')
+        plt.title('神经网络训练损失收敛趋势 (MSE)', fontsize=14)
+        plt.xlabel('训练轮次 (Epoch)')
+        plt.ylabel('损失值')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'{self.output_dir}/m3_loss_curve.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[M3] 损失曲线图已保存至: {self.output_dir}/m3_loss_curve.png")
+
+        # --- 图表 2: 预测拟合对比 ---
+        plt.figure(figsize=(12, 6))
+        sample_idx = 100
+        plt.plot(y_test.values[:sample_idx], label='真实需求量', color='black', alpha=0.4, linewidth=2)
+        plt.plot(y_nn[:sample_idx], label='神经网络预测', linestyle='--', color='red', alpha=0.8)
+        plt.plot(y_rf[:sample_idx], label='随机森林预测', linestyle=':', color='green', alpha=0.8)
+        plt.title('出行需求预测拟合对比 (局部采样)', fontsize=14)
+        plt.xlabel('测试样本索引')
+        plt.ylabel('订单需求数')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'{self.output_dir}/m3_prediction_comparison.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[M3] 预测对比图已保存至: {self.output_dir}/m3_prediction_comparison.png")
+
+
+# 优劣分析文档总结 (将作为文档输出)
+"""
+[M3 任务总结：算法对比分析]
+1. 神经网络: 在处理复杂的时空特征（如多维度ID与时间的交互）时具有更强的非线性拟合能力。
+2. 随机森林: 具有极强的鲁棒性，在小规模聚合数据上表现出色，且不容易受到数据噪声干扰。
+3. 业务应用: 建议在流量极大的核心区域（如曼哈顿中心）使用神经网络模型，在订单稀疏区域使用随机森林。
+"""
+
+# ==========================================
+# 保持原有 M1, M2 的 Main 逻辑调用不改动
+# ==========================================
 if __name__ == "__main__":
-    # 步骤1: 运行 M1 模块
+    # --- M1 & M2 (保持原样调用) ---
     processor = DataProcessor('yellow_tripdata_2023-01.parquet')
     processor.load_and_report()
     processor.clean_data_stepwise()
     processor.engineer_features()
     clean_df = processor.get_data()
 
-    # 步骤2: 运行 M2 模块
     if clean_df is not None:
         analyzer = DataAnalyzer(clean_df)
         analyzer.analyze_time_patterns()
         analyzer.analyze_location_hotspots()
         analyzer.analyze_fare_factors()
-        analyzer.analyze_insight_value()  # 执行更新后的分析
-        print("\n所有中文图表已更新并生成至 'outputs' 文件夹。")
+        analyzer.analyze_insight_value()
+
+        # --- M3 任务启动 ---
+        predictor = DemandPredictor(clean_df)
+        predictor.run_comparison_experiment()
