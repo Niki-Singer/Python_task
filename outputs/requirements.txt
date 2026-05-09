@@ -1,0 +1,12 @@
+python版本：
+3.9-3.13
+
+需要安装的库：
+pandas
+numpy
+matplotlib
+seaborn
+sklearn
+dashscope
+tensorflow
+pyarrow
